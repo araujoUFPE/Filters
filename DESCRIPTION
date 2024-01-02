@@ -1,0 +1,25 @@
+Package: Filters
+Type: Package
+Title: Phase filters
+Version: 0.1.0
+Authors@R: 
+    person(given = "Joselito",
+           family = "Araújo",
+           role = c("aut", "cre"),
+           email = "joselito.araujo@ufpr.br",
+           comment = c(ORCID = "0000-0002-7849-9572"))
+Maintainer: Joselito Araújo <joselito.araujo@ufpr.br>
+Description: The phase filters aim to enhance efficiency in reducing phase 
+             noise and execution time.
+Imports: 
+    hypergeo,
+    stats,
+    FDDPhase,
+    raster,
+    terra
+Suggests: 
+    imager
+License: GPL-3 (GNU General Public License)
+Encoding: UTF-8
+LazyData: true
+RoxygenNote: 7.2.3
