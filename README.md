@@ -10,7 +10,7 @@ See:
   doi={10.1109/TGRS.2012.2234467}
 }
 
-@article{EnhancedInterferometricPhaseNoiseFilteringoftheRefinedInSARFilter,
+@Article{EnhancedInterferometricPhaseNoiseFilteringoftheRefinedInSARFilter,
   author={Li, Tingting and Chen, Kun-Shan and Lee, John-Sen},
   journal={IEEE Geoscience and Remote Sensing Letters}, 
   title={Enhanced Interferometric Phase Noise Filtering of the Refined {I}n{SAR} Filter}, 
