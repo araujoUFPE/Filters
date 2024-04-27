@@ -1,5 +1,5 @@
 
-These filtering methods are based on the Refined Lee filter, combining it with physical and empirical models to differentiate between phases. Its main purpose is to reduce phase noise, ensuring the preservation of image quality in a short processing time.
+These filtering methods are based on the Refined Lee filter, combining it with physical and empirical models to differentiate between phases(FDDPhase). Its main purpose is to reduce phase noise, ensuring the preservation of image quality in a short processing time.
 
 
 See:
