@@ -24,4 +24,14 @@ See:
   number={9},
   pages={1528-1532},
   doi={10.1109/LGRS.2019.2951635}
+
+@INPROCEEDINGS{ARAUJO2022, 
+author={Araujo, Joselito E. and Borba, Anderson A. and Frery, Alejandro C.}, 
+booktitle={2022 3rd China International SAR Symposium (CISS)}, 
+title={{FDDP}hase: A Package For Statistical Analysis of the Phase from Polarimetric Data}, 
+year={2022}, 
+volume={}, 
+number={}, 
+pages={1-7}, 
+doi={10.1109/CISS57580.2022.9971358} }
 }
