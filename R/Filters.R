@@ -1,4 +1,3 @@
-
 require(roxygen2)
 ################################################################################
 ##        Filters: A package with filtering methods for phase data            ##
@@ -29,6 +28,8 @@ require(roxygen2)
 #'
 #' @param L  Number of looks or targeted, \code{L>1} integer.
 #'
+#' @param coherence_map coherence map
+#'
 #' @param param Vector, \code{param<-c(r, theta, L)}.
 #'
 #' @details Phase filters in the spatial domain, used to reduce phase errors
@@ -38,15 +39,16 @@ require(roxygen2)
 #'
 #' @importFrom terra rast
 #' @importFrom raster raster
+#' @importFrom circular
 #'
 #' @author Araujo, J. E.
 #'
 #' @examples
 #' # Example of function usage
-#' img_LInSARRFE <- LInSARRFE(imageRaster, param=c(0.7, 0, 2), eth=2, xi=0.9)
+#' img_LInSARRFE <- LInSARRFE(imageRaster, coherence_map, param=c(r=0.7, theta=0, L=20), eth=2, xi=0.9)
 #'
 #' @export
-LInSARRFE<-function(imageRaster,param,eth, xi=0.9){
+LInSARRFE<-function(imageRaster, coherence_map, param, eth, xi=0.90){
 
   if (dim(imageRaster)[1]<13 || dim(imageRaster)[1]<13) {
     stop("Please, insert an image with dimensions larger than 13 and repeat the
@@ -55,9 +57,71 @@ LInSARRFE<-function(imageRaster,param,eth, xi=0.9){
 
   final_image<-imageRaster
 
+  mean_circular <- function(window) {
+    # Ensure values are real
+    C <- mean(Re(cos(window)))
+    S <- mean(Re(sin(window)))
+
+    # Prevent invalid comparisons with complex numbers
+    if (is.complex(C) || is.complex(S)) {
+      stop("Error: C and S must be real, but they are complex.")
+    }
+
+    if (C > 0) {
+      psi_barr <- atan(S / C)
+    } else if (C < 0 && S >= 0) {
+      psi_barr <- atan(S / C) + pi
+    } else if (C < 0 && S < 0) {
+      psi_barr <- atan(S / C) - pi
+    } else if (C == 0 && S > 0) {
+      psi_barr <- pi / 2
+    } else {  # C == 0 && S < 0
+      psi_barr <- -pi / 2
+    }
+    return(psi_barr)
+  }
+
+  var_circular <- function(window) {
+    C1 <- mean(cos(window))
+    S1 <- mean(sin(window))
+    R <- sqrt(C1^2 + S1^2)
+    var_psi <- 1 - R
+    return(var_psi)
+  }
+
   calculate_mean_complex <- function(window) {
+    window <- window[!is.na(window)]
+    if (length(window) == 0) return(NA)
     complex_values <- exp(1i * window)
-    return(mean(complex_values))
+    mean_complex <- mean_circular(complex_values)
+    mean_phase <- Arg(mean_complex)
+    return(mean_phase)
+  }
+
+  unwrap_phase <- function(phase_matrix) {
+    if (!is.matrix(phase_matrix)) {
+      phase_matrix <- as.matrix(phase_matrix)
+    }
+    rows <- nrow(phase_matrix)
+    cols <- ncol(phase_matrix)
+
+    unwrapped <- matrix(0, nrow = rows, ncol = cols)
+    unwrapped[1, 1] <- phase_matrix[1, 1]
+
+    for (i in 1:rows) {
+      for (j in 1:cols) {
+        if (j > 1) {
+          diff_x <- phase_matrix[i, j] - phase_matrix[i, j - 1]
+          unwrapped[i, j] <- unwrapped[i, j - 1] + ifelse(diff_x > pi, diff_x - 2 * pi,
+                                                          ifelse(diff_x < -pi, diff_x + 2 * pi, diff_x))
+        } else if (i > 1) {
+          diff_y <- phase_matrix[i, j] - phase_matrix[i - 1, j]
+          unwrapped[i, j] <- unwrapped[i - 1, j] + ifelse(diff_y > pi, diff_y - 2 * pi,
+                                                          ifelse(diff_y < -pi, diff_y + 2 * pi, diff_y))
+        }
+      }
+    }
+    return(unwrapped)
   }
 
   filter_3x3_mod <- function(image) {
@@ -65,19 +129,44 @@ LInSARRFE<-function(imageRaster,param,eth, xi=0.9){
     for (i in 2:(nrow(image) - 1)) {
       for (j in 2:(ncol(image) - 1)) {
         window <- image[(i - 1):(i + 1), (j - 1):(j + 1)]
-        sortedPhases <- sort(window)
-        for (f in 1:length(sortedPhases)) {
-          if(window[5] -  psi_epsilon < sortedPhases[f] || sortedPhases[f] <= window[5] + psi_epsilon){
-            if (window[5] < sortedPhases[3] || window[5] > sortedPhases[7]) {
-              filtered_image[i, j] <- mean(sortedPhases[3:7])
-            }
-          }
+        unwrap <- unwrap_phase(window)
+        sortedPhases <- sort(unwrap)
+        psi_c <- unwrap[2, 2]
+        if (psi_c < sortedPhases[3] || psi_c > sortedPhases[7]) {
+          filtered_image[i, j] <- mean(sortedPhases[3:7])
         }
       }
     }
     return(filtered_image)
   }
 
+  select_pixels <- function(window_selected, psi_xi) {
+    psi_c <- window_selected[6, 6]
+    selected_pixels <- window_selected[
+      window_selected > (psi_c - psi_xi) & window_selected <= (psi_c + psi_xi)
+    ]
+    return(selected_pixels)
+  }
+
+  integral_func <- function(l) {
+    integrate(dFuncGierullEq7, lower = -l, upper = l, subdivisions = 1000, param = param)$value
+  }
+
+  integral <- xi
+  lower_limit <- -pi
+  upper_limit <- pi
+  psi_xi <- (-lower_limit + upper_limit) / 2
+  estimated_value<-integral_func(psi_xi)
+
+  tolerance <- 0.001
+  dm <- seq(0, pi,0.001)
+  for (d in 1:length(dm)) {
+    estimated_value<-integral_func(dm[d])
+    if(abs(estimated_value - integral) < tolerance){
+      psi_xi <- dm[d]
+      break
+    }
+  }
 
   s <- 11
   margin <- (s+1)/2  # Calculate the size of the margin for the neighborhood/lines
@@ -87,6 +176,8 @@ LInSARRFE<-function(imageRaster,param,eth, xi=0.9){
 
   for (i in margin:(nrow(imageRaster) - marginm1)) {
     for (j in margin:(ncol(imageRaster) - marginm1)) {
+
+      param[1] = coherence_map[i,j]
 
       # 20 windows of size 11x11
       window1<-window2<-window3<-window4<-window5<-window6<-window7<-window8<-window9<-window10<-window11<-window12<-window13<-window14<-window15<-window16<-window17<-window18<-window19<-window20<-matrix(0, ncol=11,nrow=11)
@@ -312,8 +403,7 @@ LInSARRFE<-function(imageRaster,param,eth, xi=0.9){
       all_windows[[19]]<-window19
       all_windows[[20]]<-window20
 
-      # Averages of all the windows
-
+      #Averages of all the windows
       averages<-c(calculate_mean_complex(window1),calculate_mean_complex(window2),calculate_mean_complex(window3),
                   calculate_mean_complex(window4),calculate_mean_complex(window5),calculate_mean_complex(window6),
                   calculate_mean_complex(window7),calculate_mean_complex(window8),calculate_mean_complex(window9),
@@ -322,67 +412,60 @@ LInSARRFE<-function(imageRaster,param,eth, xi=0.9){
                   calculate_mean_complex(window16),calculate_mean_complex(window17),calculate_mean_complex(window18),
                   calculate_mean_complex(window19),calculate_mean_complex(window20))
 
-
-      pos_window_end_angle<-which.max(Mod(averages))
-
-      window_selected<-all_windows[[pos_window_end_angle]]
-      angle_selected<-window_angle[pos_window_end_angle]
-
-
-      if(max(Mod(averages))<eth){
-        w <- 1 / sqrt((1:13 - 6)^2 + (1:13 - 6)^2)
-        w[6] <- 0  # Delete masked pixels
-        expValues <- exp(1i *  angle_selected)
-        weightedSum <- sum(w * expValues)
-        weightedSum <- weightedSum / sum(w)
+      pos_window_end_angle <- which.max(Mod(averages))
+      window_selected <- all_windows[[pos_window_end_angle]]
+      angle_selected <- window_angle[pos_window_end_angle]
+      if (max(Mod(averages)) < eth) {
+        w <- matrix(0, nrow = 13, ncol = 13)
+        for (kx in 1:13) {
+          for (ky in 1:13) {
+            w[kx, ky] <- 1 / sqrt((kx - 7)^2 + (ky - 7)^2)
+          }
+        }
+        w[7,7] <- 0  # Delete masked pixels
+        expValues <- matrix(exp(1i * angle_selected), nrow = 13, ncol = 13)
+        weightedSum <- sum(w * expValues, na.rm = TRUE) / sum(w, na.rm = TRUE)
         adjustedAngle <- Arg(weightedSum)
-        differences<-(window_angle - adjustedAngle)
-        index_closest_to_zero <- which.min(abs(differences))
-        window_selected<-all_windows[[ index_closest_to_zero]]
-        angle_selected<-window_angle[ index_closest_to_zero]
+        differences <- abs(window_angle - adjustedAngle)
+        index_closest_to_zero <- which.min(differences)
+        window_selected <- all_windows[[index_closest_to_zero]]
+        angle_selected <- window_angle[index_closest_to_zero]
       }
 
+      window_selected_filtered_3x3 <- filter_3x3_mod(window_selected)
+      pixel_select1 <- select_pixels(window_selected_filtered_3x3, psi_xi)
+      pixel_select1 <- pixel_select1[!is.na(pixel_select1)]
+      pixel_select <- unwrap_phase(pixel_select1)
 
-      integral_func <- function(l) {
-        integrate(dFuncGierullEq7, lower = -l, upper = l, subdivisions = 100, param = param)$value
+      f <- function(pixel_select) {pixel_select * dFuncGierullEq7(pixel_select, param)}
+      psi_bar <- integrate(f, lower = -psi_xi, upper = psi_xi, subdivisions = 1000)$value
+
+      f2 <- function(pixel_select){(pixel_select - psi_bar)^2 * dFuncGierullEq7(pixel_select, param)}
+      sigma_v_squared <- integrate(f2, lower = -psi_xi, upper = psi_xi, subdivisions = 1000)$value
+
+      if (param[1] < 0.1) {
+        psi_estimated <- matrix(pixel_select,
+                                nrow = nrow(window_selected_filtered_3x3),
+                                ncol = ncol(window_selected_filtered_3x3))
+      } else {
+
+        b <- 1 - (sigma_v_squared / var_circular(as.vector(pixel_select)))
+        b <- pmax(0, pmin(1, b))
+
+        psi_estimated <- matrix(mean_circular(as.vector(pixel_select)) +
+                                  b * (pixel_select - mean_circular(as.vector(pixel_select))),
+                                nrow = nrow(window_selected_filtered_3x3),
+                                ncol = ncol(window_selected_filtered_3x3))
       }
 
-      integral <- xi
-      lower_limit <- -pi
-      upper_limit <- pi
-      psi_epsilon <- (-lower_limit + upper_limit) / 2
-      estimated_value<-integral_func(psi_epsilon)
-
-      tolerance <- 0.001
-      dm <- seq(0,pi,0.001)
-      for (d in 1:length(dm)) {
-        estimated_value<-integral_func(dm[d])
-        if(abs(estimated_value - integral) < tolerance){
-          psi_epsilon <- dm[d]
-          break
+      # Update values in window_selected_filtered_3x3b
+      window_selected_filtered_3x3b <- window_selected_filtered_3x3
+      for (a in 1:ncol(window_selected_filtered_3x3)) {
+        for (b in 1:nrow(window_selected_filtered_3x3)) {
+          if (window_selected_filtered_3x3b[a,b] != 0) {window_selected_filtered_3x3b[a,b] <- psi_estimated[a,b]
+          }
         }
       }
-
-      window_selected_filtered_3x3<-filter_3x3_mod(window_selected)
-
-      f <- function(window_selected) {window_selected * dFuncGierullEq7(window_selected, param)}
-      psi_bar <- integrate(f, lower = -psi_epsilon, upper = psi_epsilon, subdivisions = 100)$value
-
-      f2 <- function(window_selected){(window_selected - psi_bar)^2 * dFuncGierullEq7(window_selected, param)}
-      sigma_v_squared <- integrate(f2, lower = -psi_epsilon, upper = psi_epsilon, subdivisions = 100)$value
-
-      b <- 1- (sigma_v_squared/var(as.vector(window_selected_filtered_3x3)))
-      b <- pmax(0, pmin(1, b)) # Limit b between 0 and 1
-
-      psi_estimated<-mean(window_selected) + b*(window_selected-mean(window_selected))
-      window_selected_filtered_3x3b<-window_selected_filtered_3x3
-
-      for (a in 1:ncol(window_selected)) {
-        for (b in 1:nrow(window_selected)) {
-          if(window_selected_filtered_3x3b[a,b]!=0){window_selected_filtered_3x3b[a,b]<-psi_estimated[a,b]}
-        }
-      }
-
 
       #1
       if(pos_window_end_angle==1){window_selected_filtered_3x3b[5:7,1:11]-> final_image[(i-1):(i+1), (j-5):(j+5)]}
@@ -599,13 +682,10 @@ LInSARRFE<-function(imageRaster,param,eth, xi=0.9){
         window_selected_filtered_3x3b[6,1:11]  -> final_image[i, (j-5):(j+5)]
         window_selected_filtered_3x3b[5,1:7]  -> final_image[(i-1), (j-5):(j+1)]
         window_selected_filtered_3x3b[4,1:3]  -> final_image[(i-2), (j-5):(j-3)]}
-
-
     }
   }
   return(final_image)
 }
-
 ############################## TcNfilter #######################################
 #' @title Phase filters
 #' @name TcNfilter
@@ -622,9 +702,11 @@ LInSARRFE<-function(imageRaster,param,eth, xi=0.9){
 #'
 #' @param xi Percentage of all pixels within the selected window.
 #'
-#' @param mu	loc: Floating point tensor; the means of the distribution(s)
+#' @param sigma_param Parameter estimate
 #'
-#' @param sigma	scale: Loating point tensor; the stddevs of the distribution(s).
+#' @param mu	loc Floating point tensor; the means of the distribution(s)
+#'
+#' @param sigma	scale Loating point tensor; the stddevs of the distribution(s).
 #'                     Must contain only positive values.
 #'
 #' @param param Vector, \code{param<-c(mu, sigma)}.
@@ -641,10 +723,10 @@ LInSARRFE<-function(imageRaster,param,eth, xi=0.9){
 #'
 #' @examples
 #' # Example of function usage
-#' img_TcNfilter <- TcNfilter(imageRaster, param=c(-0.3, 0.5), eth=2, xi=0.9)
+#' img_TcNfilter <- TcNfilter(imageRaster, sigma_param, param=c(mu=0, sigma=0.5), eth=2, xi=0.9)
 #'
 #' @export
-TcNfilter<-function(imageRaster,param,eth, xi=0.9){
+TcNfilter<-function(imageRaster, sigma_param, param, eth, xi=0.9){
 
   if (dim(imageRaster)[1]<13 || dim(imageRaster)[1]<13) {
     stop("Please, insert an image with dimensions larger than 13 and repeat the
@@ -653,9 +735,71 @@ TcNfilter<-function(imageRaster,param,eth, xi=0.9){
 
   final_image<-imageRaster
 
+  mean_circular <- function(window) {
+    # Ensure values are real
+    C <- mean(Re(cos(window)))
+    S <- mean(Re(sin(window)))
+
+    # Prevent invalid comparisons with complex numbers
+    if (is.complex(C) || is.complex(S)) {
+      stop("Error: C and S must be real, but they are complex.")
+    }
+
+    if (C > 0) {
+      psi_barr <- atan(S / C)
+    } else if (C < 0 && S >= 0) {
+      psi_barr <- atan(S / C) + pi
+    } else if (C < 0 && S < 0) {
+      psi_barr <- atan(S / C) - pi
+    } else if (C == 0 && S > 0) {
+      psi_barr <- pi / 2
+    } else {  # C == 0 && S < 0
+      psi_barr <- -pi / 2
+    }
+    return(psi_barr)
+  }
+
+  var_circular <- function(window) {
+    C1 <- mean(cos(window))
+    S1 <- mean(sin(window))
+    R <- sqrt(C1^2 + S1^2)
+    var_psi <- 1 - R
+    return(var_psi)
+  }
+
   calculate_mean_complex <- function(window) {
+    window <- window[!is.na(window)]
+    if (length(window) == 0) return(NA)
     complex_values <- exp(1i * window)
-    return(mean(complex_values))
+    mean_complex <- mean_circular(complex_values)
+    mean_phase <- Arg(mean_complex)
+    return(mean_phase)
+  }
+
+  unwrap_phase <- function(phase_matrix) {
+    if (!is.matrix(phase_matrix)) {
+      phase_matrix <- as.matrix(phase_matrix)
+    }
+    rows <- nrow(phase_matrix)
+    cols <- ncol(phase_matrix)
+
+    unwrapped <- matrix(0, nrow = rows, ncol = cols)
+    unwrapped[1, 1] <- phase_matrix[1, 1]
+
+    for (i in 1:rows) {
+      for (j in 1:cols) {
+        if (j > 1) {
+          diff_x <- phase_matrix[i, j] - phase_matrix[i, j - 1]
+          unwrapped[i, j] <- unwrapped[i, j - 1] + ifelse(diff_x > pi, diff_x - 2 * pi,
+                                                          ifelse(diff_x < -pi, diff_x + 2 * pi, diff_x))
+        } else if (i > 1) {
+          diff_y <- phase_matrix[i, j] - phase_matrix[i - 1, j]
+          unwrapped[i, j] <- unwrapped[i - 1, j] + ifelse(diff_y > pi, diff_y - 2 * pi,
+                                                          ifelse(diff_y < -pi, diff_y + 2 * pi, diff_y))
+        }
+      }
+    }
+    return(unwrapped)
   }
 
   filter_3x3_mod <- function(image) {
@@ -663,19 +807,44 @@ TcNfilter<-function(imageRaster,param,eth, xi=0.9){
     for (i in 2:(nrow(image) - 1)) {
       for (j in 2:(ncol(image) - 1)) {
         window <- image[(i - 1):(i + 1), (j - 1):(j + 1)]
-        sortedPhases <- sort(window)
-        for (f in 1:length(sortedPhases)) {
-          if(window[5] -  psi_epsilon < sortedPhases[f] || sortedPhases[f] <= window[5] + psi_epsilon){
-            if (window[5] < sortedPhases[3] || window[5] > sortedPhases[7]) {
-              filtered_image[i, j] <- mean(sortedPhases[3:7])
-            }
-          }
+        unwrap <- unwrap_phase(window)
+        sortedPhases <- sort(unwrap)
+        psi_c <- unwrap[2, 2]
+        if (psi_c < sortedPhases[3] || psi_c > sortedPhases[7]) {
+          filtered_image[i, j] <- mean(sortedPhases[3:7])
         }
       }
     }
     return(filtered_image)
   }
 
+  select_pixels <- function(window_selected, psi_xi) {
+    psi_c <- window_selected[6, 6]
+    selected_pixels <- window_selected[
+      window_selected > (psi_c - psi_xi) & window_selected <= (psi_c + psi_xi)
+    ]
+    return(selected_pixels)
+  }
+
+  integral_func <- function(l) {
+    integrate(dTruncNorm, lower = -l, upper = l, subdivisions = 1000, param = param)$value
+  }
+
+  integral <- xi
+  lower_limit <- -pi
+  upper_limit <- pi
+  psi_xi <- (-lower_limit + upper_limit) / 2
+  estimated_value<-integral_func(psi_xi)
+
+  tolerance <- 0.001
+  dm <- seq(0, pi,0.001)
+  for (d in 1:length(dm)) {
+    estimated_value<-integral_func(dm[d])
+    if(abs(estimated_value - integral) < tolerance){
+      psi_xi <- dm[d]
+      break
+    }
+  }
 
   s <- 11
   margin <- (s+1)/2  # Calculate the size of the margin for the neighborhood/lines
@@ -685,6 +854,8 @@ TcNfilter<-function(imageRaster,param,eth, xi=0.9){
 
   for (i in margin:(nrow(imageRaster) - marginm1)) {
     for (j in margin:(ncol(imageRaster) - marginm1)) {
+
+      param[2] = sigma_param[i,j]
 
       # 20 windows of size 11x11
       window1<-window2<-window3<-window4<-window5<-window6<-window7<-window8<-window9<-window10<-window11<-window12<-window13<-window14<-window15<-window16<-window17<-window18<-window19<-window20<-matrix(0, ncol=11,nrow=11)
@@ -910,77 +1081,63 @@ TcNfilter<-function(imageRaster,param,eth, xi=0.9){
       all_windows[[19]]<-window19
       all_windows[[20]]<-window20
 
-      # Averages of all the windows
+      #Averages of all the windows
 
-      averages<-c(calculate_mean_complex(window1),calculate_mean_complex(window2),calculate_mean_complex(window3),
-                  calculate_mean_complex(window4),calculate_mean_complex(window5),calculate_mean_complex(window6),
-                  calculate_mean_complex(window7),calculate_mean_complex(window8),calculate_mean_complex(window9),
-                  calculate_mean_complex(window10),calculate_mean_complex(window11),calculate_mean_complex(window12),
-                  calculate_mean_complex(window13),calculate_mean_complex(window14),calculate_mean_complex(window15),
-                  calculate_mean_complex(window16),calculate_mean_complex(window17),calculate_mean_complex(window18),
-                  calculate_mean_complex(window19),calculate_mean_complex(window20))
+      averages<-c(calculate_mean_complex(window1), calculate_mean_complex(window2), calculate_mean_complex(window3),
+                  calculate_mean_complex(window4), calculate_mean_complex(window5), calculate_mean_complex(window6),
+                  calculate_mean_complex(window7), calculate_mean_complex(window8), calculate_mean_complex(window9),
+                  calculate_mean_complex(window10), calculate_mean_complex(window11), calculate_mean_complex(window12),
+                  calculate_mean_complex(window13), calculate_mean_complex(window14), calculate_mean_complex(window15),
+                  calculate_mean_complex(window16), calculate_mean_complex(window17), calculate_mean_complex(window18),
+                  calculate_mean_complex(window19), calculate_mean_complex(window20))
 
-
-      pos_window_end_angle<-which.max(Mod(averages))
-
-      window_selected<-all_windows[[pos_window_end_angle]]
-      angle_selected<-window_angle[pos_window_end_angle]
-
-
-      if(max(Mod(averages))<eth){
-        w <- 1 / sqrt((1:13 - 6)^2 + (1:13 - 6)^2)
-        w[6] <- 0  # Delete masked pixels
-        expValues <- exp(1i *  angle_selected)
-        weightedSum <- sum(w * expValues)
-        weightedSum <- weightedSum / sum(w)
-        adjustedAngle <- Arg(weightedSum)
-        differences<-(window_angle - adjustedAngle)
-        index_closest_to_zero <- which.min(abs(differences))
-        window_selected<-all_windows[[ index_closest_to_zero]]
-        angle_selected<-window_angle[ index_closest_to_zero]
-      }
-
-
-      integral_func <- function(l) {
-        integrate(dTruncNorm, lower = -l, upper = l, subdivisions = 100, param = param)$value
-      }
-
-      integral <- xi
-      lower_limit <- -pi
-      upper_limit <- pi
-      psi_epsilon <- (-lower_limit + upper_limit) / 2
-      estimated_value<-integral_func(psi_epsilon)
-
-      tolerance <- 0.001
-      dm <- seq(0,pi,0.001)
-      for (d in 1:length(dm)) {
-        estimated_value<-integral_func(dm[d])
-        if(abs(estimated_value - integral) < tolerance){
-          psi_epsilon <- dm[d]
-          break
+      pos_window_end_angle <- which.max(Mod(averages))
+      window_selected <- all_windows[[pos_window_end_angle]]
+      angle_selected <- window_angle[pos_window_end_angle]
+      if (max(Mod(averages)) < eth) {
+        w <- matrix(0, nrow = 13, ncol = 13)
+        for (kx in 1:13) {
+          for (ky in 1:13) {
+            w[kx, ky] <- 1 / sqrt((kx - 7)^2 + (ky - 7)^2)
+          }
         }
+        w[7,7] <- 0  # Delete masked pixels
+        expValues <- matrix(exp(1i * angle_selected), nrow = 13, ncol = 13)
+        weightedSum <- sum(w * expValues, na.rm = TRUE) / sum(w, na.rm = TRUE)
+        adjustedAngle <- Arg(weightedSum)
+        differences <- abs(window_angle - adjustedAngle)
+        index_closest_to_zero <- which.min(differences)
+        window_selected <- all_windows[[index_closest_to_zero]]
+        angle_selected <- window_angle[index_closest_to_zero]
       }
 
-      window_selected_filtered_3x3<-filter_3x3_mod(window_selected)
+      window_selected_filtered_3x3 <- filter_3x3_mod(window_selected)
+      pixel_select1 <- select_pixels(window_selected_filtered_3x3, psi_xi)
+      pixel_select1 <- pixel_select1[!is.na(pixel_select1)]
+      pixel_select <- unwrap_phase(pixel_select1)
 
-      f <- function(window_selected) {window_selected * dTruncNorm(window_selected, param)}
-      psi_bar <- integrate(f, lower = -psi_epsilon, upper = psi_epsilon, subdivisions = 100)$value
+      f <- function(pixel_select) {pixel_select * dTruncNorm(pixel_select, param)}
+      psi_bar <- integrate(f, lower = -psi_xi, upper = psi_xi, subdivisions = 1000)$value
 
-      f2 <- function(window_selected){(window_selected - psi_bar)^2 * dTruncNorm(window_selected, param)}
-      sigma_v_squared <- integrate(f2, lower = -psi_epsilon, upper = psi_epsilon, subdivisions = 100)$value
+      f2 <- function(pixel_select){(pixel_select - psi_bar)^2 * dTruncNorm(pixel_select, param)}
+      sigma_v_squared <- integrate(f2, lower = -psi_xi, upper = psi_xi, subdivisions = 1000)$value
 
-      b <- 1- (sigma_v_squared/var(as.vector(window_selected_filtered_3x3)))
+      b <- 1- (sigma_v_squared/var_circular(as.vector(pixel_select)))
       b <- pmax(0, pmin(1, b)) # Limit b between 0 and 1
 
-      psi_estimated<-mean(window_selected) + b*(window_selected-mean(window_selected))
-      window_selected_filtered_3x3b<-window_selected_filtered_3x3
+      # Ensure psi_estimated has the same dimensions as window_selected_filtered_3x3b
+      psi_estimated <- matrix(mean_circular(as.vector(pixel_select)) + b * (pixel_select - mean_circular(as.vector(pixel_select))),
+                              nrow = nrow(window_selected_filtered_3x3),
+                              ncol = ncol(window_selected_filtered_3x3))
 
-      for (a in 1:ncol(window_selected)) {
-        for (b in 1:nrow(window_selected)) {
-          if(window_selected_filtered_3x3b[a,b]!=0){window_selected_filtered_3x3b[a,b]<-psi_estimated[a,b]}
+      # Update values in window_selected_filtered_3x3b
+      window_selected_filtered_3x3b <- window_selected_filtered_3x3
+      for (a in 1:ncol(window_selected_filtered_3x3)) {
+        for (b in 1:nrow(window_selected_filtered_3x3)) {
+          if (window_selected_filtered_3x3b[a,b] != 0) {window_selected_filtered_3x3b[a,b] <- psi_estimated[a,b]
+          }
         }
       }
-
 
       #1
       if(pos_window_end_angle==1){window_selected_filtered_3x3b[5:7,1:11]-> final_image[(i-1):(i+1), (j-5):(j+5)]}
@@ -1197,8 +1354,6 @@ TcNfilter<-function(imageRaster,param,eth, xi=0.9){
         window_selected_filtered_3x3b[6,1:11]  -> final_image[i, (j-5):(j+5)]
         window_selected_filtered_3x3b[5,1:7]  -> final_image[(i-1), (j-5):(j+1)]
         window_selected_filtered_3x3b[4,1:3]  -> final_image[(i-2), (j-5):(j-3)]}
-
-
     }
   }
   return(final_image)
@@ -1221,10 +1376,12 @@ TcNfilter<-function(imageRaster,param,eth, xi=0.9){
 #'
 #' @param xi Percentage of all pixels within the selected window.
 #'
-#' @param mu	loc: Floating point tensor; the modes of the corresponding
+#' @param sigma_param Parameter estimate
+#'
+#' @param mu	loc Floating point tensor; the modes of the corresponding
 #'                non-truncated Cauchy distribution(s)
 #'
-#' @param sigma	scale: Floating point tensor; the scales of the distribution(s).
+#' @param sigma	scale Floating point tensor; the scales of the distribution(s).
 #'                     Must contain only positive values.
 #'
 #' @param param Vector, \code{param<-c(mu, sigma)}.
@@ -1241,10 +1398,10 @@ TcNfilter<-function(imageRaster,param,eth, xi=0.9){
 #'
 #' @examples
 #' # Example of function usage
-#' img_TcCfilter <- TcCfilter(imageRaster, param=c(-0.9, 0.2), eth=2, xi=0.9)
+#' img_TcCfilter <- TcCfilter(imageRaster, sigma_param, param=c(mu=0, sigma=0.5), eth=2, xi=0.9)
 #'
 #' @export
-TcCfilter<-function(imageRaster,param,eth, xi=0.9){
+TcCfilter<-function(imageRaster, sigma_param, param, eth, xi=0.9){
 
   if (dim(imageRaster)[1]<13 || dim(imageRaster)[1]<13) {
     stop("Please, insert an image with dimensions larger than 13 and repeat the
@@ -1253,9 +1410,71 @@ TcCfilter<-function(imageRaster,param,eth, xi=0.9){
 
   final_image<-imageRaster
 
+  mean_circular <- function(window) {
+    # Ensure values are real
+    C <- mean(Re(cos(window)))
+    S <- mean(Re(sin(window)))
+
+    # Prevent invalid comparisons with complex numbers
+    if (is.complex(C) || is.complex(S)) {
+      stop("Error: C and S must be real, but they are complex.")
+    }
+
+    if (C > 0) {
+      psi_barr <- atan(S / C)
+    } else if (C < 0 && S >= 0) {
+      psi_barr <- atan(S / C) + pi
+    } else if (C < 0 && S < 0) {
+      psi_barr <- atan(S / C) - pi
+    } else if (C == 0 && S > 0) {
+      psi_barr <- pi / 2
+    } else {  # C == 0 && S < 0
+      psi_barr <- -pi / 2
+    }
+    return(psi_barr)
+  }
+
+  var_circular <- function(window) {
+    C1 <- mean(cos(window))
+    S1 <- mean(sin(window))
+    R <- sqrt(C1^2 + S1^2)
+    var_psi <- 1 - R
+    return(var_psi)
+  }
+
   calculate_mean_complex <- function(window) {
+    window <- window[!is.na(window)]
+    if (length(window) == 0) return(NA)
     complex_values <- exp(1i * window)
-    return(mean(complex_values))
+    mean_complex <- mean_circular(complex_values)
+    mean_phase <- Arg(mean_complex)
+    return(mean_phase)
+  }
+
+  unwrap_phase <- function(phase_matrix) {
+    if (!is.matrix(phase_matrix)) {
+      phase_matrix <- as.matrix(phase_matrix)
+    }
+    rows <- nrow(phase_matrix)
+    cols <- ncol(phase_matrix)
+
+    unwrapped <- matrix(0, nrow = rows, ncol = cols)
+    unwrapped[1, 1] <- phase_matrix[1, 1]
+
+    for (i in 1:rows) {
+      for (j in 1:cols) {
+        if (j > 1) {
+          diff_x <- phase_matrix[i, j] - phase_matrix[i, j - 1]
+          unwrapped[i, j] <- unwrapped[i, j - 1] + ifelse(diff_x > pi, diff_x - 2 * pi,
+                                                          ifelse(diff_x < -pi, diff_x + 2 * pi, diff_x))
+        } else if (i > 1) {
+          diff_y <- phase_matrix[i, j] - phase_matrix[i - 1, j]
+          unwrapped[i, j] <- unwrapped[i - 1, j] + ifelse(diff_y > pi, diff_y - 2 * pi,
+                                                          ifelse(diff_y < -pi, diff_y + 2 * pi, diff_y))
+        }
+      }
+    }
+    return(unwrapped)
   }
 
   filter_3x3_mod <- function(image) {
@@ -1263,19 +1482,44 @@ TcCfilter<-function(imageRaster,param,eth, xi=0.9){
     for (i in 2:(nrow(image) - 1)) {
       for (j in 2:(ncol(image) - 1)) {
         window <- image[(i - 1):(i + 1), (j - 1):(j + 1)]
-        sortedPhases <- sort(window)
-        for (f in 1:length(sortedPhases)) {
-          if(window[5] -  psi_epsilon < sortedPhases[f] || sortedPhases[f] <= window[5] + psi_epsilon){
-            if (window[5] < sortedPhases[3] || window[5] > sortedPhases[7]) {
-              filtered_image[i, j] <- mean(sortedPhases[3:7])
-            }
-          }
+        unwrap <- unwrap_phase(window)
+        sortedPhases <- sort(unwrap)
+        psi_c <- unwrap[2, 2]
+        if (psi_c < sortedPhases[3] || psi_c > sortedPhases[7]) {
+          filtered_image[i, j] <- mean(sortedPhases[3:7])
         }
       }
     }
     return(filtered_image)
   }
 
+  select_pixels <- function(window_selected, psi_xi) {
+    psi_c <- window_selected[6, 6]
+    selected_pixels <- window_selected[
+      window_selected > (psi_c - psi_xi) & window_selected <= (psi_c + psi_xi)
+    ]
+    return(selected_pixels)
+  }
+
+  integral_func <- function(l) {
+    integrate(dTruncCauchy, lower = -l, upper = l, subdivisions = 1000, param = param)$value
+  }
+
+  integral <- xi
+  lower_limit <- -pi
+  upper_limit <- pi
+  psi_xi <- (-lower_limit + upper_limit) / 2
+  estimated_value<-integral_func(psi_xi)
+
+  tolerance <- 0.001
+  dm <- seq(0, pi,0.001)
+  for (d in 1:length(dm)) {
+    estimated_value<-integral_func(dm[d])
+    if(abs(estimated_value - integral) < tolerance){
+      psi_xi <- dm[d]
+      break
+    }
+  }
 
   s <- 11
   margin <- (s+1)/2  # Calculate the size of the margin for the neighborhood/lines
@@ -1285,6 +1529,8 @@ TcCfilter<-function(imageRaster,param,eth, xi=0.9){
 
   for (i in margin:(nrow(imageRaster) - marginm1)) {
     for (j in margin:(ncol(imageRaster) - marginm1)) {
+
+      param[2] = sigma_param[i,j]
 
       # 20 windows of size 11x11
       window1<-window2<-window3<-window4<-window5<-window6<-window7<-window8<-window9<-window10<-window11<-window12<-window13<-window14<-window15<-window16<-window17<-window18<-window19<-window20<-matrix(0, ncol=11,nrow=11)
@@ -1510,77 +1756,63 @@ TcCfilter<-function(imageRaster,param,eth, xi=0.9){
       all_windows[[19]]<-window19
       all_windows[[20]]<-window20
 
-      # Averages of all the windows
+      #Averages of all the windows
 
-      averages<-c(calculate_mean_complex(window1),calculate_mean_complex(window2),calculate_mean_complex(window3),
-                  calculate_mean_complex(window4),calculate_mean_complex(window5),calculate_mean_complex(window6),
-                  calculate_mean_complex(window7),calculate_mean_complex(window8),calculate_mean_complex(window9),
-                  calculate_mean_complex(window10),calculate_mean_complex(window11),calculate_mean_complex(window12),
-                  calculate_mean_complex(window13),calculate_mean_complex(window14),calculate_mean_complex(window15),
-                  calculate_mean_complex(window16),calculate_mean_complex(window17),calculate_mean_complex(window18),
-                  calculate_mean_complex(window19),calculate_mean_complex(window20))
+      averages<-c(calculate_mean_complex(window1), calculate_mean_complex(window2), calculate_mean_complex(window3),
+                  calculate_mean_complex(window4), calculate_mean_complex(window5), calculate_mean_complex(window6),
+                  calculate_mean_complex(window7), calculate_mean_complex(window8), calculate_mean_complex(window9),
+                  calculate_mean_complex(window10), calculate_mean_complex(window11), calculate_mean_complex(window12),
+                  calculate_mean_complex(window13), calculate_mean_complex(window14), calculate_mean_complex(window15),
+                  calculate_mean_complex(window16), calculate_mean_complex(window17), calculate_mean_complex(window18),
+                  calculate_mean_complex(window19), calculate_mean_complex(window20))
 
-
-      pos_window_end_angle<-which.max(Mod(averages))
-
-      window_selected<-all_windows[[pos_window_end_angle]]
-      angle_selected<-window_angle[pos_window_end_angle]
-
-
-      if(max(Mod(averages))<eth){
-        w <- 1 / sqrt((1:13 - 6)^2 + (1:13 - 6)^2)
-        w[6] <- 0  # Delete masked pixels
-        expValues <- exp(1i *  angle_selected)
-        weightedSum <- sum(w * expValues)
-        weightedSum <- weightedSum / sum(w)
-        adjustedAngle <- Arg(weightedSum)
-        differences<-(window_angle - adjustedAngle)
-        index_closest_to_zero <- which.min(abs(differences))
-        window_selected<-all_windows[[ index_closest_to_zero]]
-        angle_selected<-window_angle[ index_closest_to_zero]
-      }
-
-
-      integral_func <- function(l) {
-        integrate(dTruncCauchy, lower = -l, upper = l, subdivisions = 100, param = param)$value
-      }
-
-      integral <- xi
-      lower_limit <- -pi
-      upper_limit <- pi
-      psi_epsilon <- (-lower_limit + upper_limit) / 2
-      estimated_value<-integral_func(psi_epsilon)
-
-      tolerance <- 0.001
-      dm <- seq(0,pi,0.001)
-      for (d in 1:length(dm)) {
-        estimated_value<-integral_func(dm[d])
-        if(abs(estimated_value - integral) < tolerance){
-          psi_epsilon <- dm[d]
-          break
+      pos_window_end_angle <- which.max(Mod(averages))
+      window_selected <- all_windows[[pos_window_end_angle]]
+      angle_selected <- window_angle[pos_window_end_angle]
+      if (max(Mod(averages)) < eth) {
+        w <- matrix(0, nrow = 13, ncol = 13)
+        for (kx in 1:13) {
+          for (ky in 1:13) {
+            w[kx, ky] <- 1 / sqrt((kx - 7)^2 + (ky - 7)^2)
+          }
         }
+        w[7,7] <- 0  # Delete masked pixels
+        expValues <- matrix(exp(1i * angle_selected), nrow = 13, ncol = 13)
+        weightedSum <- sum(w * expValues, na.rm = TRUE) / sum(w, na.rm = TRUE)
+        adjustedAngle <- Arg(weightedSum)
+        differences <- abs(window_angle - adjustedAngle)
+        index_closest_to_zero <- which.min(differences)
+        window_selected <- all_windows[[index_closest_to_zero]]
+        angle_selected <- window_angle[index_closest_to_zero]
       }
 
-      window_selected_filtered_3x3<-filter_3x3_mod(window_selected)
+      window_selected_filtered_3x3 <- filter_3x3_mod(window_selected)
+      pixel_select1 <- select_pixels(window_selected_filtered_3x3, psi_xi)
+      pixel_select1 <- pixel_select1[!is.na(pixel_select1)]
+      pixel_select <- unwrap_phase(pixel_select1)
 
-      f <- function(window_selected) {window_selected * dTruncCauchy(window_selected, param)}
-      psi_bar <- integrate(f, lower = -psi_epsilon, upper = psi_epsilon, subdivisions = 100)$value
+      f <- function(pixel_select) {pixel_select * dTruncCauchy(pixel_select, param)}
+      psi_bar <- integrate(f, lower = -psi_xi, upper = psi_xi, subdivisions = 1000)$value
 
-      f2 <- function(window_selected){(window_selected - psi_bar)^2 * dTruncCauchy(window_selected, param)}
-      sigma_v_squared <- integrate(f2, lower = -psi_epsilon, upper = psi_epsilon, subdivisions = 100)$value
+      f2 <- function(pixel_select){(pixel_select - psi_bar)^2 * dTruncCauchy(pixel_select, param)}
+      sigma_v_squared <- integrate(f2, lower = -psi_xi, upper = psi_xi, subdivisions = 1000)$value
 
-      b <- 1- (sigma_v_squared/var(as.vector(window_selected_filtered_3x3)))
+      b <- 1- (sigma_v_squared/var_circular(as.vector(pixel_select)))
       b <- pmax(0, pmin(1, b)) # Limit b between 0 and 1
 
-      psi_estimated<-mean(window_selected) + b*(window_selected-mean(window_selected))
-      window_selected_filtered_3x3b<-window_selected_filtered_3x3
+      # Ensure psi_estimated has the same dimensions as window_selected_filtered_3x3b
+      psi_estimated <- matrix(mean_circular(as.vector(pixel_select)) + b * (pixel_select - mean_circular(as.vector(pixel_select))),
+                              nrow = nrow(window_selected_filtered_3x3),
+                              ncol = ncol(window_selected_filtered_3x3))
 
-      for (a in 1:ncol(window_selected)) {
-        for (b in 1:nrow(window_selected)) {
-          if(window_selected_filtered_3x3b[a,b]!=0){window_selected_filtered_3x3b[a,b]<-psi_estimated[a,b]}
+      # Update values in window_selected_filtered_3x3b
+      window_selected_filtered_3x3b <- window_selected_filtered_3x3
+      for (a in 1:ncol(window_selected_filtered_3x3)) {
+        for (b in 1:nrow(window_selected_filtered_3x3)) {
+          if (window_selected_filtered_3x3b[a,b] != 0) {window_selected_filtered_3x3b[a,b] <- psi_estimated[a,b]
+          }
         }
       }
-
 
       #1
       if(pos_window_end_angle==1){window_selected_filtered_3x3b[5:7,1:11]-> final_image[(i-1):(i+1), (j-5):(j+5)]}
@@ -1797,8 +2029,9 @@ TcCfilter<-function(imageRaster,param,eth, xi=0.9){
         window_selected_filtered_3x3b[6,1:11]  -> final_image[i, (j-5):(j+5)]
         window_selected_filtered_3x3b[5,1:7]  -> final_image[(i-1), (j-5):(j+1)]
         window_selected_filtered_3x3b[4,1:3]  -> final_image[(i-2), (j-5):(j-3)]}
-
     }
   }
   return(final_image)
 }
+
+
