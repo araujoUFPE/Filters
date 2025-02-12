@@ -43,7 +43,7 @@ LInSARRFE<-function(imageRaster, coherence_map, param, eth, xi=0.90){
     window <- window[!is.na(window)]
     if (length(window) == 0) return(NA)
     complex_values <- exp(1i * window)
-    mean_complex <- mean_circular(complex_values)
+    mean_complex <- mean(complex_values)
     mean_phase <- Arg(mean_complex)
     return(mean_phase)
   }
@@ -83,7 +83,7 @@ LInSARRFE<-function(imageRaster, coherence_map, param, eth, xi=0.90){
         sortedPhases <- sort(unwrap)
         psi_c <- unwrap[2, 2]
         if (psi_c < sortedPhases[3] || psi_c > sortedPhases[7]) {
-          filtered_image[i, j] <- mean(sortedPhases[3:7])
+          filtered_image[i, j] <- mean_circular(sortedPhases[3:7])
         }
       }
     }
